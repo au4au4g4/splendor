@@ -13,6 +13,7 @@ import argparse
 import html
 import http.server
 import io
+import re
 import socketserver
 import traceback
 import urllib.parse
@@ -36,6 +37,8 @@ from azg_human_hints import (
 )
 
 DEFAULT_CHECKPOINT = "../alpha-zero-general/splendor/pretrained_2players.pt"
+OFFICIAL_GUI_URL = "https://cestpasphoto.github.io/splendor.html?players=2"
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass
@@ -99,6 +102,14 @@ def parse_args() -> argparse.Namespace:
         help="Temperature used for displayed visit distribution.",
     )
     parser.add_argument("--ai-first", action="store_true", help="Let the checkpoint AI move first.")
+    parser.add_argument(
+        "--official-companion",
+        action="store_true",
+        help=(
+            "Open a side-by-side page with the official card UI and the local "
+            "hint panel. The two panes are not automatically synchronized."
+        ),
+    )
     parser.add_argument("--no-open", action="store_true", help="Do not open a browser automatically.")
     return parser.parse_args()
 
@@ -182,11 +193,15 @@ def percent(value: Optional[float]) -> str:
     return "n/a" if value is None else f"{100.0 * value:.1f}%"
 
 
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
 def board_html(game, board) -> str:
     stream = io.StringIO()
     with redirect_stdout(stream):
         game.printBoard(board)
-    return html.escape(stream.getvalue())
+    return html.escape(strip_ansi(stream.getvalue()))
 
 
 def move_label(game, formatter, action: int, player: int) -> str:
@@ -300,7 +315,12 @@ def render(ctx: AppContext) -> bytes:
         status.append("AI 思考中；請重新整理")
 
     status_html = "".join(f'<span class="pill">{html.escape(item)}</span>' for item in status)
-    board_panel = f"<section class='panel'><h2>盤面</h2><pre class='board'>{board_html(ctx.game, board)}</pre></section>"
+    board_panel = (
+        "<section class='panel'><h2>盤面</h2>"
+        "<p class='muted'>提示版 GUI 目前使用 alpha-zero-general 的文字盤面；"
+        "它不是官方 cestpasphoto.github.io 的卡片式前端。</p>"
+        f"<pre class='board'>{board_html(ctx.game, board)}</pre></section>"
+    )
 
     if ended:
         right_panel = "<section class='panel'><h2>遊戲結束</h2><p>請關閉 server 後重新啟動以開始新局。</p></section>"
@@ -331,6 +351,27 @@ def render(ctx: AppContext) -> bytes:
     return html_page("Splendor AlphaZero 建議走法 GUI", body)
 
 
+
+def render_official_companion() -> bytes:
+    body = f"""
+<header>
+  <h1>Splendor 官方卡片外觀 + 建議走法</h1>
+  <p class="muted">左邊是官方 cestpasphoto 卡片式 GUI；右邊是本機 AlphaZero / MCTS 建議面板。</p>
+  <p class="muted"><strong>注意：</strong>兩邊目前無法自動同步。請把右側建議當參考，在左側官方 GUI 手動下同一手；如果你也在右側按「下這手」，請確保左側同步操作相同局面。</p>
+  <a class="button" href="/" target="_blank">只開建議面板</a>
+  <a class="button" href="{OFFICIAL_GUI_URL}" target="_blank" rel="noopener noreferrer">另開官方 GUI</a>
+</header>
+<main style="grid-template-columns: minmax(640px, 1.15fr) minmax(520px, .85fr); height: calc(100vh - 132px);">
+  <section class="panel" style="padding:0; overflow:hidden;">
+    <iframe title="Official Splendor GUI" src="{OFFICIAL_GUI_URL}" style="width:100%; height:100%; border:0; background:white;"></iframe>
+  </section>
+  <section class="panel" style="padding:0; overflow:hidden;">
+    <iframe title="Local AlphaZero hints" src="/" style="width:100%; height:100%; border:0;"></iframe>
+  </section>
+</main>
+"""
+    return html_page("Splendor 官方卡片外觀 + 建議走法", body)
+
 class HintGuiHandler(http.server.BaseHTTPRequestHandler):
     ctx: AppContext
 
@@ -351,6 +392,9 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
+            if self.path.startswith("/official-companion"):
+                self.send_html(render_official_companion())
+                return
             advance_ai_until_human(self.ctx)
             self.send_html(render(self.ctx))
         except Exception as exc:  # Keep browser UI helpful instead of dropping the socket.
@@ -415,6 +459,8 @@ def main() -> None:
     handler = type("ConfiguredHintGuiHandler", (HintGuiHandler,), {"ctx": ctx})
     with socketserver.TCPServer(("127.0.0.1", args.port), handler) as server:
         url = f"http://127.0.0.1:{args.port}/"
+        if args.official_companion:
+            url = f"http://127.0.0.1:{args.port}/official-companion"
         print(f"Splendor hint GUI: {url}")
         print("Press Ctrl+C to stop.")
         if not args.no_open:

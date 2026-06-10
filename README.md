@@ -54,6 +54,27 @@ No ONNX function found for aten.adaptive_max_pool2d
 
 如果你有加 `--modern-onnx-export`，請先移除；只有在你明確想測試 PyTorch 新 exporter 時才需要它。
 
+
+## 官方卡片外觀 + 建議走法（伴隨模式）
+
+如果你想要官方 <https://cestpasphoto.github.io/splendor.html> 的卡片式外觀，同時在旁邊看到本工具的 AlphaZero 建議，可以啟動伴隨模式：
+
+```bash
+python tools/splendor_hint_gui.py \
+  --azg-path ../alpha-zero-general \
+  --checkpoint ../alpha-zero-general/splendor/pretrained_2players.pt \
+  --top 8 \
+  --numMCTSSims 200 \
+  --official-companion
+```
+
+這會開啟一個左右分割頁面：
+
+- 左邊：官方卡片式 Splendor GUI。
+- 右邊：本機 MCTS 建議面板。
+
+> 重要限制：官方網頁和本機建議面板目前**不會自動同步局面**。請把右側建議當參考，在左側官方 GUI 手動下同一手；如果你也在右側按「下這手」，要確保兩邊都走相同局面。完整自動同步需要改寫或接入官方前端的遊戲狀態 API，目前官方 hosted page 沒有提供這個介面。
+
 ## 有建議走法的圖形介面（本機 GUI）
 
 如果你要「圖形介面 + 建議走法」，請使用本專案的本機 browser GUI，而不是官方 hosted GUI：
@@ -87,6 +108,16 @@ http://127.0.0.1:8766/
 ```
 
 > 官方 <https://cestpasphoto.github.io/splendor.html> 是完整圖形化遊戲，但無法顯示本工具的 MCTS 建議表；要看建議走法請使用 `tools/splendor_hint_gui.py`。
+
+
+### 為什麼提示版 GUI 長得和官方網頁不一樣？
+
+`tools/splendor_hint_gui.py` 是本專案的「提示版 GUI」：它直接跑 Python 版 `alpha-zero-general` / MCTS，並把建議走法顯示在瀏覽器中。為了能取得 `win%`、`visits`、`prior%`，目前盤面區使用 upstream Python `printBoard` 的文字盤面，再搭配右側建議表與按鈕。
+
+官方 <https://cestpasphoto.github.io/splendor.html> 是另一套前端，畫面是漂亮的卡片式 UI，但它沒有提供本專案 MCTS root node 的建議表。也就是：
+
+- 要官方卡片外觀：使用 `python tools/open_splendor_gui.py --official`，但沒有本工具的建議走法表。
+- 要 `win%` / `visits` / `prior%` 建議：使用 `python tools/splendor_hint_gui.py`，目前是文字盤面 + 建議表。
 
 ## 圖形化介面（GUI）對戰
 

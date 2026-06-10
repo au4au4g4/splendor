@@ -79,6 +79,29 @@ python tools/splendor_hint_gui.py \
 
 因此資料層是同步的：建議、下棋、AI 回合自動回應與 Undo 都會一起更新。若你需要可靠同步，建議使用 `--integrated-card-ui`；它比 `--official-card-hints` 更適合實際對局。
 
+## Vendored 官方風格本機前端（同步建議 + 卡片/Token 點擊 + Undo）
+
+如果你想要更接近官方 hosted Splendor 頁面的卡片桌面配置，但又需要和本機 AlphaZero 後端完全同步，可以使用 repo 內建的 vendored official-style 前端：
+
+```bash
+python tools/splendor_hint_gui.py \
+  --azg-path ../alpha-zero-general \
+  --checkpoint ../alpha-zero-general/splendor/pretrained_2players.pt \
+  --top 8 \
+  --numMCTSSims 200 \
+  --official-local-ui
+```
+
+這個模式會開啟 `/official-local-ui`，並從 `tools/static/official_splendor/` 服務 HTML/CSS/JS。它不載入 hosted `https://cestpasphoto.github.io/splendor.html` iframe，而是把官方風格前端改成同源、後端驅動的資料流：
+
+- `GET /api/state` 是唯一局面來源，包含 `board.legal_moves` 與 `board.hints` / top-level `hints`。
+- 點 visible card、reserved card、token 動作或 side-panel 建議時，前端會從結構化 `board.legal_moves` 找到對應 legal action。
+- 所有下棋操作都透過 `POST /api/move`，回應後再重新讀取 `/api/state`。
+- `Undo` 按鈕會呼叫 `POST /api/undo`，然後重新同步局面。
+- AlphaZero 建議會同時顯示在右側面板，並以 badge 標在對應的卡片、token 動作或 legal action 上。
+
+因此這個 vendored official-style UI 和 `--integrated-card-ui` 一樣是同步模式；差別是它的靜態前端資產在 repo 內，路由為 `/official-local-ui`。相對地，`--official-card-hints` 仍保留為 hosted iframe companion mode，不會自動同步局面。
+
 ## 官方卡片外觀 + 建議走法（伴隨模式）
 
 如果你想要官方 <https://cestpasphoto.github.io/splendor.html> 的卡片式外觀，同時在旁邊看到本工具的 AlphaZero 建議，可以啟動伴隨模式：

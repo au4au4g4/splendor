@@ -14,6 +14,7 @@ import html
 import http.server
 import io
 import json
+import mimetypes
 import re
 import socketserver
 import traceback
@@ -21,6 +22,7 @@ import urllib.parse
 import webbrowser
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 from azg_human_hints import (
@@ -39,6 +41,7 @@ from azg_human_hints import (
 
 DEFAULT_CHECKPOINT = "../alpha-zero-general/splendor/pretrained_2players.pt"
 OFFICIAL_GUI_URL = "https://cestpasphoto.github.io/splendor.html?players=2"
+OFFICIAL_LOCAL_UI_ROOT = Path(__file__).resolve().parent / "static" / "official_splendor"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -97,6 +100,16 @@ def legal_move_kind(action: int) -> str:
     if action < 80:
         return "give_gems"
     return "pass"
+
+
+def player_gems_row_index(num_players: int, player: int) -> int:
+    num_nobles = num_players + 1
+    gems_start = 32 + num_nobles
+    return gems_start + player
+
+
+def gem_delta(before, after) -> dict[str, int]:
+    return {name: int(after[index]) - int(before[index]) for index, name in enumerate(GEM_NAMES)}
 
 
 def enrich_legal_moves(moves: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -280,6 +293,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--official-local-ui",
+        action="store_true",
+        help=(
+            "Open the vendored same-origin official-style frontend. It is driven by "
+            "/api/state, /api/move, and /api/undo instead of hosted iframe state."
+        ),
+    )
+    parser.add_argument(
         "--official-card-hints",
         action="store_true",
         help=(
@@ -445,14 +466,30 @@ def legal_moves_for_api(ctx: AppContext):
         return []
     canonical_board = ctx.game.getCanonicalForm(ctx.state.board, ctx.state.current_player)
     valid_moves = ctx.game.getValidMoves(canonical_board, 0)
-    return [
-        {
+    num_players = int(ctx.game.getNumberOfPlayers()) if hasattr(ctx.game, "getNumberOfPlayers") else 2
+    gems_row = player_gems_row_index(num_players, ctx.human_player)
+    moves = []
+    for action, is_valid in enumerate(valid_moves):
+        if not is_valid:
+            continue
+        item = {
             "action": action,
             "label": move_label(ctx.game, ctx.formatter, action, ctx.human_player),
         }
-        for action, is_valid in enumerate(valid_moves)
-        if is_valid
-    ]
+        kind = legal_move_kind(action)
+        if kind in {"take_gems", "give_gems"}:
+            try:
+                next_board, _ = ctx.game.getNextState(
+                    ctx.state.board.copy(),
+                    ctx.state.current_player,
+                    action,
+                    random_seed=0,
+                )
+                item["gem_delta"] = gem_delta(ctx.state.board[gems_row], next_board[gems_row])
+            except Exception:
+                item["gem_delta"] = {}
+        moves.append(item)
+    return moves
 
 
 def state_payload(ctx: AppContext) -> dict:
@@ -862,6 +899,29 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def send_static_file(self, root: Path, request_prefix: str, index_name: str = "index.html") -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        relative = parsed.path.removeprefix(request_prefix).lstrip("/") or index_name
+        candidate = (root / urllib.parse.unquote(relative)).resolve()
+        root_resolved = root.resolve()
+        if root_resolved != candidate and root_resolved not in candidate.parents:
+            self.send_html(b"Not found", status=404)
+            return
+        if candidate.is_dir():
+            candidate = candidate / index_name
+        if not candidate.exists() or not candidate.is_file():
+            self.send_html(b"Not found", status=404)
+            return
+        content = candidate.read_bytes()
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def redirect_home(self) -> None:
         self.send_response(303)
         self.send_header("Location", "/")
@@ -875,6 +935,9 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
                 return
             if self.path.startswith("/integrated-card-ui"):
                 self.send_html(render_integrated_card_ui())
+                return
+            if self.path.startswith("/official-local-ui"):
+                self.send_static_file(OFFICIAL_LOCAL_UI_ROOT, "/official-local-ui")
                 return
             if self.path.startswith("/official-card-hints"):
                 self.send_html(render_official_card_hints())
@@ -964,6 +1027,8 @@ def main() -> None:
         url = f"http://127.0.0.1:{args.port}/"
         if args.integrated_card_ui:
             url = f"http://127.0.0.1:{args.port}/integrated-card-ui"
+        elif args.official_local_ui:
+            url = f"http://127.0.0.1:{args.port}/official-local-ui"
         elif args.official_card_hints:
             url = f"http://127.0.0.1:{args.port}/official-card-hints"
         elif args.official_companion:

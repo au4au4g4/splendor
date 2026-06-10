@@ -21,7 +21,7 @@ import urllib.parse
 import webbrowser
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from azg_human_hints import (
     HistoryEntry,
@@ -40,6 +40,174 @@ from azg_human_hints import (
 DEFAULT_CHECKPOINT = "../alpha-zero-general/splendor/pretrained_2players.pt"
 OFFICIAL_GUI_URL = "https://cestpasphoto.github.io/splendor.html?players=2"
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+GEM_NAMES = ["white", "blue", "green", "red", "black", "gold"]
+CARD_COLOR_NAMES = GEM_NAMES[:5]
+
+
+def int_list(values, length: Optional[int] = None) -> list[int]:
+    items = [int(value) for value in list(values)]
+    return items if length is None else items[:length]
+
+
+def gem_counts(values, include_gold: bool = True) -> dict[str, int]:
+    count = 6 if include_gold else 5
+    return {name: int(values[index]) for index, name in enumerate(GEM_NAMES[:count])}
+
+
+def card_from_rows(cost_row, value_row, *, action: Optional[int] = None, reserve_action: Optional[int] = None) -> Optional[dict[str, Any]]:
+    cost = int_list(cost_row, 7)
+    value = int_list(value_row, 7)
+    if sum(cost[:5]) == 0 and sum(value[:5]) == 0 and int(value[6]) == 0:
+        return None
+    color_index = next((index for index, amount in enumerate(value[:5]) if amount), None)
+    return {
+        "color": CARD_COLOR_NAMES[color_index] if color_index is not None else "unknown",
+        "points": int(value[6]),
+        "cost": gem_counts(cost, include_gold=False),
+        "raw_cost": cost,
+        "raw_value": value,
+        "action": action,
+        "reserve_action": reserve_action,
+    }
+
+
+def noble_from_row(row, *, index: int) -> Optional[dict[str, Any]]:
+    values = int_list(row, 7)
+    if int(values[6]) == 0:
+        return None
+    return {
+        "index": index,
+        "points": int(values[6]),
+        "cost": gem_counts(values, include_gold=False),
+        "raw": values,
+    }
+
+
+def legal_move_kind(action: int) -> str:
+    if action < 12:
+        return "buy_visible"
+    if action < 27:
+        return "reserve"
+    if action < 30:
+        return "buy_reserved"
+    if action < 60:
+        return "take_gems"
+    if action < 80:
+        return "give_gems"
+    return "pass"
+
+
+def enrich_legal_moves(moves: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched = []
+    for move in moves:
+        action = int(move["action"])
+        item = dict(move)
+        item["kind"] = legal_move_kind(action)
+        if action < 12:
+            item["tier"] = action // 4
+            item["index"] = action % 4
+        elif action < 24:
+            reserve_index = action - 12
+            item["tier"] = reserve_index // 4
+            item["index"] = reserve_index % 4
+        elif action < 27:
+            item["tier"] = action - 24
+        elif action < 30:
+            item["index"] = action - 27
+        enriched.append(item)
+    return enriched
+
+
+def serialize_splendor_board(ctx: AppContext, legal_moves: list[dict[str, Any]], hints: list[dict[str, Any]]) -> dict[str, Any]:
+    """Convert the upstream Splendor ndarray into a browser-friendly board model.
+
+    The upstream engine stores the board as a compact 2-D ndarray.  Keeping that
+    knowledge here avoids making the browser parse ``printBoard()`` text and
+    gives every UI mode the same synchronized backend data.
+    """
+    board = ctx.state.board
+    num_players = int(ctx.game.getNumberOfPlayers()) if hasattr(ctx.game, "getNumberOfPlayers") else 2
+    num_nobles = num_players + 1
+    legal_actions = {int(move["action"]) for move in legal_moves}
+
+    visible_cards_by_tier = []
+    for tier in range(3):
+        cards = []
+        for index in range(4):
+            row = 1 + 8 * tier + 2 * index
+            buy_action = tier * 4 + index
+            reserve_action = 12 + tier * 4 + index
+            card = card_from_rows(
+                board[row],
+                board[row + 1],
+                action=buy_action if buy_action in legal_actions else None,
+                reserve_action=reserve_action if reserve_action in legal_actions else None,
+            )
+            if card is None:
+                card = {
+                    "color": "empty",
+                    "points": 0,
+                    "cost": gem_counts([0, 0, 0, 0, 0], include_gold=False),
+                    "action": None,
+                    "reserve_action": None,
+                }
+            card["tier"] = tier
+            card["index"] = index
+            cards.append(card)
+        deck_count = int(sum(int(value) for value in board[25 + 2 * tier][:5])) if len(board) > 25 + 2 * tier else 0
+        visible_cards_by_tier.append({"tier": tier, "deck_count": deck_count, "cards": cards})
+
+    nobles = [
+        noble
+        for noble in (noble_from_row(board[31 + index], index=index) for index in range(num_nobles))
+        if noble is not None
+    ]
+
+    players = []
+    gems_start = 32 + num_nobles
+    player_nobles_start = 32 + 2 * num_players
+    cards_start = 32 + 3 * num_players + num_players * num_players
+    reserved_start = 32 + 4 * num_players + num_players * num_players
+    for player in range(num_players):
+        noble_rows = board[player_nobles_start + player * num_nobles : player_nobles_start + (player + 1) * num_nobles]
+        player_nobles = [noble for noble in (noble_from_row(row, index=index) for index, row in enumerate(noble_rows)) if noble]
+        reserved = []
+        for index in range(3):
+            row = reserved_start + 6 * player + 2 * index
+            reserve_card = card_from_rows(
+                board[row],
+                board[row + 1],
+                action=(27 + index if player == ctx.human_player and 27 + index in legal_actions else None),
+            )
+            if reserve_card is not None:
+                reserve_card["index"] = index
+                reserved.append(reserve_card)
+        cards_row = int_list(board[cards_start + player], 7)
+        try:
+            score = int(ctx.game.getScore(board, player))
+        except Exception:
+            score = int(cards_row[6] + sum(noble["points"] for noble in player_nobles))
+        players.append({
+            "id": player,
+            "is_human": player == ctx.human_player,
+            "score": score,
+            "gems": gem_counts(board[gems_start + player], include_gold=True),
+            "cards": {name: int(cards_row[index]) for index, name in enumerate(CARD_COLOR_NAMES)},
+            "card_points": int(cards_row[6]),
+            "nobles": player_nobles,
+            "reserved": reserved,
+        })
+
+    return {
+        "visible_cards_by_tier": visible_cards_by_tier,
+        "nobles": nobles,
+        "bank_gems": gem_counts(board[0], include_gold=True),
+        "players": players,
+        "legal_moves": enrich_legal_moves(legal_moves),
+        "hints": hints,
+    }
 
 
 @dataclass
@@ -297,6 +465,8 @@ def state_payload(ctx: AppContext) -> dict:
         status.append("輪到你")
     else:
         status.append("AI 思考中")
+    hints = hint_rows_for_api(ctx)
+    legal_moves = legal_moves_for_api(ctx)
     return {
         "turn": ctx.state.turn,
         "current_player": ctx.state.current_player,
@@ -304,8 +474,9 @@ def state_payload(ctx: AppContext) -> dict:
         "ended": ended,
         "status": status,
         "board_text": strip_ansi(board_text(ctx.game, board)),
-        "hints": hint_rows_for_api(ctx),
-        "legal_moves": legal_moves_for_api(ctx),
+        "hints": hints,
+        "legal_moves": legal_moves,
+        "board": serialize_splendor_board(ctx, legal_moves, hints),
         "log": list(reversed(ctx.state.log[-80:])),
     }
 
@@ -489,48 +660,116 @@ def render(ctx: AppContext) -> bytes:
 
 def render_integrated_card_ui() -> bytes:
     body = """
-<header>
-  <h1>Splendor AlphaZero 資料層整合版</h1>
-  <p class="muted">此頁不用官方 hosted iframe；盤面、建議、下棋、AI 回合與 Undo 全部共用同一個 Python 後端狀態，因此不會不同步。</p>
-  <button onclick="undoMove()" class="danger">Undo</button>
-  <button onclick="loadState()">重新整理</button>
+<header class="official-header">
+  <div>
+    <h1>Splendor AlphaZero 官方風格同步版</h1>
+    <p class="muted">此頁不用官方 hosted iframe；卡片、token、玩家區、建議、下棋、AI 回合與 Undo 全部由本機 Python 後端狀態驅動。</p>
+  </div>
+  <div class="toolbar">
+    <button onclick="undoMove()" class="danger">Undo</button>
+    <button onclick="loadState()">重新整理</button>
+  </div>
 </header>
-<main style="grid-template-columns:minmax(520px,1.2fr) minmax(420px,.8fr);">
-  <section class="panel">
-    <h2>卡片式盤面區</h2>
+<style>
+  body { background: radial-gradient(circle at top, #29405f 0, #162238 42%, #0b1020 100%); }
+  main.official-layout { display:grid; grid-template-columns:minmax(720px,1.45fr) minmax(440px,.75fr); gap:1rem; padding:1rem; }
+  .official-header { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; }
+  .toolbar { display:flex; gap:.5rem; flex-wrap:wrap; }
+  .tableau { background:linear-gradient(145deg, rgba(15,23,42,.88), rgba(30,41,59,.78)); border:1px solid rgba(226,232,240,.18); border-radius:18px; box-shadow:0 20px 60px rgba(0,0,0,.35); padding:1rem; }
+  .top-strip { display:grid; grid-template-columns:minmax(220px,.65fr) 1fr; gap:1rem; margin:.85rem 0 1rem; }
+  .bank, .nobles, .player, .side-card { background:rgba(2,6,23,.42); border:1px solid rgba(148,163,184,.24); border-radius:16px; padding:.75rem; }
+  .section-title { color:#fde68a; font-weight:900; letter-spacing:.04em; text-transform:uppercase; font-size:.78rem; margin-bottom:.55rem; }
+  .tokens { display:flex; gap:.45rem; flex-wrap:wrap; align-items:center; }
+  .gem { width:38px; height:38px; border-radius:50%; display:inline-grid; place-items:center; font-weight:900; border:3px solid rgba(255,255,255,.55); box-shadow: inset 0 2px 8px rgba(255,255,255,.28), 0 6px 14px rgba(0,0,0,.35); color:#0f172a; }
+  .gem.small { width:25px; height:25px; border-width:2px; font-size:.72rem; }
+  .gem.white { background:#f8fafc; } .gem.blue { background:#3b82f6; color:#eff6ff; } .gem.green { background:#22c55e; } .gem.red { background:#ef4444; color:#fff1f2; } .gem.black { background:#171717; color:#f8fafc; } .gem.gold { background:#facc15; }
+  .tier-row { display:grid; grid-template-columns:88px repeat(4, minmax(122px, 1fr)); gap:.75rem; align-items:stretch; margin-bottom:.85rem; }
+  .deck { border-radius:14px; background:linear-gradient(160deg,#6b4a2b,#27160b); border:2px solid rgba(253,230,138,.45); display:grid; place-items:center; text-align:center; font-weight:900; color:#fde68a; box-shadow:0 10px 22px rgba(0,0,0,.35); min-height:154px; }
+  .spl-card { min-height:154px; border:0; border-radius:15px; padding:.65rem; color:#0f172a; cursor:default; text-align:left; position:relative; overflow:hidden; box-shadow:0 12px 28px rgba(0,0,0,.42); outline:1px solid rgba(255,255,255,.28); }
+  .spl-card::after { content:""; position:absolute; inset:36px 10px 44px; border-radius:50%; background:rgba(255,255,255,.16); filter:blur(.5px); }
+  .spl-card.playable { cursor:pointer; transform:translateY(0); transition:transform .12s ease, box-shadow .12s ease; }
+  .spl-card.playable:hover { transform:translateY(-3px); box-shadow:0 18px 34px rgba(0,0,0,.55), 0 0 0 3px rgba(250,204,21,.55); }
+  .card-white { background:linear-gradient(145deg,#fff,#cbd5e1); } .card-blue { background:linear-gradient(145deg,#60a5fa,#1d4ed8); color:#eff6ff; } .card-green { background:linear-gradient(145deg,#4ade80,#15803d); } .card-red { background:linear-gradient(145deg,#fb7185,#b91c1c); color:#fff1f2; } .card-black { background:linear-gradient(145deg,#525252,#020617); color:#f8fafc; } .card-empty { background:rgba(71,85,105,.45); color:#cbd5e1; }
+  .points { position:absolute; top:.5rem; left:.65rem; font-size:1.65rem; font-weight:1000; text-shadow:0 2px 5px rgba(0,0,0,.3); z-index:1; }
+  .card-action { position:absolute; top:.55rem; right:.55rem; z-index:2; display:flex; gap:.25rem; }
+  .mini-btn { padding:.18rem .35rem; border-radius:999px; font-size:.72rem; background:rgba(15,23,42,.76); color:#fff; border:1px solid rgba(255,255,255,.32); }
+  .costs { position:absolute; left:.55rem; bottom:.5rem; display:flex; gap:.24rem; flex-wrap:wrap; z-index:2; max-width:82%; }
+  .noble-list, .player-grid { display:flex; gap:.6rem; flex-wrap:wrap; }
+  .noble-tile { min-width:92px; border-radius:12px; padding:.5rem; background:linear-gradient(145deg,#fef3c7,#92400e); color:#1f2937; font-weight:800; box-shadow:0 8px 18px rgba(0,0,0,.3); }
+  .players { display:grid; gap:.75rem; }
+  .player.current { outline:2px solid #facc15; }
+  .player-head { display:flex; justify-content:space-between; gap:.6rem; align-items:center; margin-bottom:.55rem; }
+  .score { font-size:1.5rem; color:#fde68a; font-weight:1000; }
+  .reserved { display:grid; grid-template-columns:repeat(3,minmax(88px,1fr)); gap:.45rem; margin-top:.55rem; }
+  .reserve-card { min-height:86px; border-radius:10px; padding:.4rem; font-size:.78rem; }
+  .owned { display:flex; gap:.35rem; flex-wrap:wrap; }
+  .owned-pill { border-radius:999px; padding:.12rem .45rem; background:rgba(15,23,42,.58); border:1px solid rgba(255,255,255,.18); }
+  @media (max-width: 1120px) { main.official-layout, .top-strip { grid-template-columns:1fr; } .tier-row { grid-template-columns:70px repeat(2,minmax(120px,1fr)); } }
+</style>
+<main class="official-layout">
+  <section class="tableau">
     <div id="status" class="moves"></div>
-    <div id="boardCards" style="display:grid;grid-template-columns:repeat(5,minmax(90px,1fr));gap:.75rem;margin-top:1rem;"></div>
+    <div class="top-strip">
+      <div class="bank"><div class="section-title">Bank tokens</div><div id="bank" class="tokens"></div></div>
+      <div class="nobles"><div class="section-title">Nobles</div><div id="nobles" class="noble-list"></div></div>
+    </div>
+    <div id="tiers"></div>
     <details style="margin-top:1rem"><summary>文字盤面 / debug</summary><pre id="boardText" class="board"></pre></details>
   </section>
-  <section class="panel">
+  <aside class="panel">
+    <h2>玩家區</h2>
+    <div id="players" class="players"></div>
     <h2>建議走法</h2>
-    <p class="muted">點「下這手」會直接送到同一個後端狀態，AI 也會自動回應；這裡是真正同步的資料層。</p>
+    <p class="muted">點卡片、token 動作或「下這手」都會呼叫 <code>/api/move</code>，因此建議、落子與 Undo 都同步。</p>
     <div id="hints"></div>
     <h2>所有合法動作</h2>
     <div id="legalMoves" class="moves"></div>
     <h2>紀錄</h2>
     <ol id="log" class="log"></ol>
-  </section>
+  </aside>
 </main>
 <script>
+const gemOrder = ['white','blue','green','red','black','gold'];
+const gemLabel = {white:'白', blue:'藍', green:'綠', red:'紅', black:'黑', gold:'金'};
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
 }
-function cardColor(label) {
-  if (label.includes('blue') || label.includes('B')) return '#2563eb';
-  if (label.includes('green') || label.includes('G')) return '#16a34a';
-  if (label.includes('red') || label.includes('R')) return '#dc2626';
-  if (label.includes('white') || label.includes('W')) return '#e5e7eb';
-  if (label.includes('black') || label.includes('K')) return '#27272a';
-  return '#475569';
+function gemToken(color, value, small=false) {
+  return `<span class="gem ${color} ${small ? 'small' : ''}" title="${color}">${value}</span>`;
 }
-function renderPseudoCards(moves) {
-  const cards = moves.slice(0, 25).map(move => `
-    <button onclick="playMove(${move.action})" style="min-height:112px;text-align:left;border-radius:12px;background:${cardColor(move.label)};border:1px solid rgba(255,255,255,.35);box-shadow:0 8px 20px rgba(0,0,0,.22);">
-      <strong style="font-size:1.2rem">#${move.action}</strong><br>
-      <span style="font-size:.82rem">${escapeHtml(move.label)}</span>
-    </button>`).join('');
-  document.getElementById('boardCards').innerHTML = cards || '<p class="muted">目前沒有可顯示的合法動作卡片。</p>';
+function costTokens(cost) {
+  return gemOrder.slice(0,5).filter(color => cost[color] > 0).map(color => gemToken(color, cost[color], true)).join('') || '<span class="muted">free</span>';
+}
+function renderCard(card) {
+  const playable = card.action !== null || card.reserve_action !== null;
+  const onclick = card.action !== null ? `onclick="playMove(${card.action})"` : '';
+  const reserve = card.reserve_action !== null ? `<button class="mini-btn" onclick="event.stopPropagation(); playMove(${card.reserve_action})">保留</button>` : '';
+  const buy = card.action !== null ? `<span class="mini-btn">買 #${card.action}</span>` : '';
+  if (card.color === 'empty') return `<div class="spl-card card-empty"><span class="muted">empty</span></div>`;
+  return `<div class="spl-card card-${card.color} ${playable ? 'playable' : ''}" ${onclick}>
+    <div class="points">${card.points || ''}</div>
+    <div class="card-action">${buy}${reserve}</div>
+    <div class="costs">${costTokens(card.cost)}</div>
+  </div>`;
+}
+function renderBoard(board) {
+  document.getElementById('bank').innerHTML = gemOrder.map(color => gemToken(color, board.bank_gems[color])).join('');
+  document.getElementById('nobles').innerHTML = board.nobles.map(noble => `<div class="noble-tile"><div>${noble.points} pts</div><div class="tokens">${costTokens(noble.cost)}</div></div>`).join('') || '<p class="muted">沒有可顯示的貴族。</p>';
+  document.getElementById('tiers').innerHTML = board.visible_cards_by_tier.slice().reverse().map(tier => `
+    <div class="tier-row">
+      <div class="deck">Tier ${tier.tier + 1}<br><span class="muted">deck ${tier.deck_count}</span></div>
+      ${tier.cards.map(renderCard).join('')}
+    </div>`).join('');
+  renderPlayers(board.players);
+}
+function renderPlayers(players) {
+  document.getElementById('players').innerHTML = players.map(player => `<section class="player ${player.is_human ? 'current' : ''}">
+    <div class="player-head"><strong>P${player.id}${player.is_human ? '（你）' : ''}</strong><span class="score">${player.score}</span></div>
+    <div class="section-title">Gems</div><div class="tokens">${gemOrder.map(color => gemToken(color, player.gems[color], true)).join('')}</div>
+    <div class="section-title" style="margin-top:.5rem">已購買卡</div><div class="owned">${gemOrder.slice(0,5).map(color => `<span class="owned-pill">${gemLabel[color]} ${player.cards[color]}</span>`).join('')}<span class="owned-pill">卡分 ${player.card_points}</span></div>
+    <div class="section-title" style="margin-top:.5rem">貴族</div><div>${player.nobles.map(n => `<span class="owned-pill">${n.points} pts</span>`).join('') || '<span class="muted">無</span>'}</div>
+    <div class="section-title" style="margin-top:.5rem">保留卡</div><div class="reserved">${player.reserved.map(card => `<div class="reserve-card card-${card.color} ${card.action !== null ? 'playable' : ''}" ${card.action !== null ? `onclick="playMove(${card.action})"` : ''}><strong>${card.points || ''}</strong><div class="costs">${costTokens(card.cost)}</div></div>`).join('') || '<span class="muted">無</span>'}</div>
+  </section>`).join('');
 }
 function renderHints(hints) {
   if (!hints.length) {
@@ -548,9 +787,9 @@ async function loadState() {
   const state = await response.json();
   document.getElementById('status').innerHTML = state.status.map(item => `<span class="pill">${escapeHtml(item)}</span>`).join('');
   document.getElementById('boardText').textContent = state.board_text;
-  renderPseudoCards(state.legal_moves);
-  renderHints(state.hints);
-  renderLegalMoves(state.legal_moves);
+  renderBoard(state.board);
+  renderHints(state.board.hints || state.hints);
+  renderLegalMoves(state.board.legal_moves || state.legal_moves);
   document.getElementById('log').innerHTML = state.log.map(item => `<li>${escapeHtml(item)}</li>`).join('');
 }
 async function playMove(action) {
@@ -564,7 +803,7 @@ async function undoMove() {
 loadState();
 </script>
 """
-    return html_page("Splendor AlphaZero 資料層整合版", body)
+    return html_page("Splendor AlphaZero 官方風格同步版", body)
 
 def render_official_card_hints() -> bytes:
     body = f"""

@@ -69,15 +69,15 @@ python tools/splendor_hint_gui.py \
   --integrated-card-ui
 ```
 
-這個模式不使用官方 hosted iframe；它用同一個 Python 後端狀態提供：
+這個模式不使用官方 hosted iframe；它是「官方風格外觀，但由本機後端驅動」的同步前端，會透過 `tools/splendor_hint_gui.py` 的 `/api/state`、`/api/move`、`/api/undo` 讀寫同一份 Python 遊戲狀態。`/api/state` 會回傳結構化盤面資料，包括：
 
-- 盤面資料。
-- AlphaZero/MCTS 建議。
-- 合法動作按鈕。
-- AI 回合自動回應。
-- Undo。
+- 依 tier 分組的 visible cards。
+- 貴族與 bank gems。
+- 每位玩家的 gems、已購買卡、保留卡、貴族、分數。
+- legal moves。
+- AlphaZero/MCTS hint rows。
 
-因此資料層是同步的。缺點是卡片視覺不是官方前端的完整複製，而是本專案的本機卡片化呈現。
+因此資料層是同步的：建議、下棋、AI 回合自動回應與 Undo 都會一起更新。若你需要可靠同步，建議使用 `--integrated-card-ui`；它比 `--official-card-hints` 更適合實際對局。
 
 ## 官方卡片外觀 + 建議走法（伴隨模式）
 
@@ -99,7 +99,7 @@ python tools/splendor_hint_gui.py \
 
 如果你比較喜歡左右分割視窗，可以把 `--official-card-hints` 換成 `--official-companion`。
 
-> 重要限制：這是「視覺整合」，不是完整資料層整合。官方網頁和本機建議面板目前**不會自動同步局面**。若要同步資料層，請改用 `--integrated-card-ui`。
+> 重要限制：這是「視覺伴隨模式」，不是完整資料層整合。官方 hosted 頁面無法讓本機 Python 後端可靠讀寫其內部遊戲狀態，所以官方網頁和本機建議面板**不會自動同步局面**。若要同步資料層，請改用推薦的 `--integrated-card-ui` 官方風格同步前端。
 
 ## 有建議走法的圖形介面（本機 GUI）
 

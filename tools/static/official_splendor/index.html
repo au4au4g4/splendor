@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Splendor official local UI</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Local official-style frontend</p>
+        <h1>Splendor with AI</h1>
+        <p id="status" class="status"></p>
+      </div>
+      <div class="actions">
+        <button id="refresh" type="button">Refresh</button>
+        <button id="undo" class="danger" type="button">Undo</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="table-panel">
+        <section class="nobles" aria-label="Nobles">
+          <h2>Nobles</h2>
+          <div id="nobles" class="noble-row"></div>
+        </section>
+
+        <section class="bank" aria-label="Bank">
+          <h2>Bank</h2>
+          <p class="small">Click a legal token bundle below, or click a token color to choose the first matching legal token move.</p>
+          <div id="bankTokens" class="tokens"></div>
+          <div id="tokenMoves" class="token-moves"></div>
+        </section>
+
+        <section id="board" class="board" aria-label="Visible cards"></section>
+      </section>
+
+      <aside class="side-panel">
+        <section>
+          <h2>AlphaZero suggestions</h2>
+          <p class="small">Suggestions are read from <code>board.hints</code> / <code>hints</code> and badges are attached to matching legal actions.</p>
+          <div id="hints" class="hints"></div>
+        </section>
+
+        <section>
+          <h2>Players</h2>
+          <div id="players" class="players"></div>
+        </section>
+
+        <section>
+          <h2>Legal actions</h2>
+          <div id="legalMoves" class="legal-moves"></div>
+        </section>
+
+        <section>
+          <h2>Log</h2>
+          <ul id="log" class="log"></ul>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

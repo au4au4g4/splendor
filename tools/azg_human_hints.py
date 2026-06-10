@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import inspect
 import os
 import sys
 import zlib
@@ -86,6 +87,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpuct", "-c", type=float, default=None, help="Override cpuct.")
     parser.add_argument("--fpu", "-f", type=float, default=None, help="Override first-play urgency.")
     parser.add_argument(
+        "--modern-onnx-export",
+        action="store_true",
+        help=(
+            "Use PyTorch's default ONNX exporter. By default this launcher forces "
+            "the legacy exporter for better compatibility with the Splendor model."
+        ),
+    )
+    parser.add_argument(
         "--hint-temperature",
         type=float,
         default=0.01,
@@ -144,7 +153,38 @@ def mcts_args_from_checkpoint(args: argparse.Namespace, additional_keys: dict, d
     })
 
 
+
+def install_legacy_onnx_export_patch() -> None:
+    """Force PyTorch's legacy ONNX exporter when available.
+
+    Newer PyTorch releases default to the dynamo ONNX exporter.  The upstream
+    Splendor network uses ``adaptive_max_pool2d``, which currently fails in that
+    exporter on some Windows/Python 3.13 installations.  The legacy exporter is
+    sufficient for this model and matches older working environments.
+    """
+    try:
+        import torch.onnx
+    except ImportError:
+        return
+
+    if getattr(torch.onnx.export, "_splendor_legacy_patch", False):
+        return
+
+    original_export = torch.onnx.export
+    export_parameters = inspect.signature(original_export).parameters
+
+    def export_with_legacy_default(*args, **kwargs):
+        if "dynamo" in export_parameters:
+            kwargs.setdefault("dynamo", False)
+        return original_export(*args, **kwargs)
+
+    export_with_legacy_default._splendor_legacy_patch = True
+    torch.onnx.export = export_with_legacy_default
+
 def build_advisor(game, nnet_cls, mcts_cls, dotdict, checkpoint: str, args: argparse.Namespace):
+    if not getattr(args, "modern_onnx_export", False):
+        install_legacy_onnx_export_patch()
+
     nn_args = {
         "lr": None,
         "dropout": 0.0,

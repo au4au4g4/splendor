@@ -16,11 +16,43 @@
 ```bash
 git clone https://github.com/cestpasphoto/alpha-zero-general.git ../alpha-zero-general
 cd ../alpha-zero-general
-pip install onnxruntime onnx numba tqdm colorama coloredlogs
+pip install onnxruntime onnx onnxscript numba tqdm colorama coloredlogs
 pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 該 upstream repository 已包含 Splendor 的 `pretrained_2players.pt`、`pretrained_3players.pt`、`pretrained_4players.pt`。
+
+### Windows / Python 3.13 常見錯誤：`No module named 'onnxscript'`
+
+如果啟動本機 GUI 後瀏覽器或終端機出現：
+
+```text
+ModuleNotFoundError: No module named 'onnxscript'
+```
+
+代表新版 PyTorch 在匯出 ONNX inference model 時需要額外套件。請在同一個 Python 環境執行：
+
+```bash
+pip install onnxscript
+```
+
+如果仍有 ONNX 相關錯誤，建議更新這三個套件：
+
+```bash
+pip install --upgrade onnx onnxscript onnxruntime
+```
+
+### Windows / Python 3.13 常見錯誤：`adaptive_max_pool2d` ONNX conversion
+
+如果你看到：
+
+```text
+No ONNX function found for aten.adaptive_max_pool2d
+```
+
+這通常是新版 PyTorch 預設使用 dynamo ONNX exporter，但 Splendor model 內的 `adaptive_max_pool2d` 在該 exporter 上轉換失敗。本專案預設會在啟動時改用 legacy ONNX exporter，所以請先更新到最新版後重新執行原本指令即可。
+
+如果你有加 `--modern-onnx-export`，請先移除；只有在你明確想測試 PyTorch 新 exporter 時才需要它。
 
 ## 有建議走法的圖形介面（本機 GUI）
 

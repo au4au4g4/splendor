@@ -14,6 +14,7 @@ import html
 import http.server
 import io
 import socketserver
+import traceback
 import urllib.parse
 import webbrowser
 from contextlib import redirect_stdout
@@ -84,6 +85,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpuct", "-c", type=float, default=None, help="Override cpuct.")
     parser.add_argument("--fpu", "-f", type=float, default=None, help="Override first-play urgency.")
     parser.add_argument(
+        "--modern-onnx-export",
+        action="store_true",
+        help=(
+            "Use PyTorch's default ONNX exporter. By default this GUI forces "
+            "the legacy exporter for better compatibility with the Splendor model."
+        ),
+    )
+    parser.add_argument(
         "--hint-temperature",
         type=float,
         default=0.01,
@@ -126,6 +135,48 @@ def html_page(title: str, body: str) -> bytes:
 <body>{body}</body>
 </html>""".encode()
 
+
+
+def dependency_fix_for(exc: BaseException) -> str:
+    message = str(exc)
+    if "adaptive_max_pool2d" in message and "ONNX" in message:
+        return (
+            "<p><strong>ONNX exporter 不相容。</strong> 你的 PyTorch 正在用新版 "
+            "dynamo ONNX exporter 匯出 Splendor model，但它無法轉換 "
+            "<code>adaptive_max_pool2d</code>。</p>"
+            "<p>本專案最新版預設會強制使用 legacy ONNX exporter。請確認你已更新 "
+            "<code>tools/azg_human_hints.py</code> 與 <code>tools/splendor_hint_gui.py</code>，"
+            "然後重新啟動同一個指令。</p>"
+            "<p>如果你有加 <code>--modern-onnx-export</code>，請先拿掉它。</p>"
+        )
+    if isinstance(exc, ModuleNotFoundError) and exc.name == "onnxscript":
+        return (
+            "<p><strong>缺少 onnxscript。</strong> 新版 PyTorch 的 ONNX export 會用到 "
+            "<code>onnxscript</code>；請在你的 upstream/目前 Python 環境安裝：</p>"
+            "<pre>pip install onnxscript</pre>"
+            "<p>如果仍有 ONNX 相關錯誤，建議一併更新：</p>"
+            "<pre>pip install --upgrade onnx onnxscript onnxruntime</pre>"
+        )
+    return (
+        "<p>請先確認已依 README 安裝 upstream dependencies，且 "
+        "<code>--azg-path</code> / <code>--checkpoint</code> 指向正確位置。</p>"
+    )
+
+
+def render_runtime_error(exc: BaseException) -> bytes:
+    trace = html.escape("".join(traceback.format_exception(exc)))
+    body = (
+        "<header><h1>Splendor hint GUI 啟動或推論失敗</h1>"
+        "<a class='button' href='/'>重新整理</a></header>"
+        "<main><section class='panel'>"
+        f"<h2>{html.escape(type(exc).__name__)}</h2>"
+        f"<p>{html.escape(str(exc))}</p>"
+        f"{dependency_fix_for(exc)}"
+        "<h2>詳細 traceback</h2>"
+        f"<pre class='board'>{trace}</pre>"
+        "</section></main>"
+    )
+    return html_page("Splendor hint GUI error", body)
 
 def percent(value: Optional[float]) -> str:
     return "n/a" if value is None else f"{100.0 * value:.1f}%"
@@ -299,32 +350,38 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        advance_ai_until_human(self.ctx)
-        self.send_html(render(self.ctx))
+        try:
+            advance_ai_until_human(self.ctx)
+            self.send_html(render(self.ctx))
+        except Exception as exc:  # Keep browser UI helpful instead of dropping the socket.
+            self.send_html(render_runtime_error(exc), status=500)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
-        data = urllib.parse.parse_qs(self.rfile.read(length).decode())
-        if self.path == "/move":
-            action = int(data.get("action", ["-1"])[0])
-            if not game_ended(self.ctx) and self.ctx.state.current_player == self.ctx.human_player:
-                apply_action(self.ctx, action, "Human")
-                advance_ai_until_human(self.ctx)
-        elif self.path == "/undo":
-            previous = rewind_history(
-                self.ctx.state.history,
-                UndoMode.SAME_PLAYER,
-                self.ctx.human_player,
-            )
-            if previous is None:
-                append_log(self.ctx, "沒有可 undo 的人類回合。")
-            else:
-                self.ctx.state.board = previous.board.copy()
-                self.ctx.state.current_player = previous.current_player
-                self.ctx.state.turn = previous.turn
-                self.ctx.mcts_cls.reset_all_search_trees()
-                append_log(self.ctx, "Undo：回到你上一次決策前。")
-        self.redirect_home()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = urllib.parse.parse_qs(self.rfile.read(length).decode())
+            if self.path == "/move":
+                action = int(data.get("action", ["-1"])[0])
+                if not game_ended(self.ctx) and self.ctx.state.current_player == self.ctx.human_player:
+                    apply_action(self.ctx, action, "Human")
+                    advance_ai_until_human(self.ctx)
+            elif self.path == "/undo":
+                previous = rewind_history(
+                    self.ctx.state.history,
+                    UndoMode.SAME_PLAYER,
+                    self.ctx.human_player,
+                )
+                if previous is None:
+                    append_log(self.ctx, "沒有可 undo 的人類回合。")
+                else:
+                    self.ctx.state.board = previous.board.copy()
+                    self.ctx.state.current_player = previous.current_player
+                    self.ctx.state.turn = previous.turn
+                    self.ctx.mcts_cls.reset_all_search_trees()
+                    append_log(self.ctx, "Undo：回到你上一次決策前。")
+            self.redirect_home()
+        except Exception as exc:  # Keep browser UI helpful instead of dropping the socket.
+            self.send_html(render_runtime_error(exc), status=500)
 
 
 def build_context(args: argparse.Namespace) -> AppContext:
@@ -349,7 +406,6 @@ def build_context(args: argparse.Namespace) -> AppContext:
         human_player=human_player,
         state=state,
     )
-    advance_ai_until_human(ctx)
     return ctx
 
 

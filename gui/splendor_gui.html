@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Splendor 圖形化 AI 對戰</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+
+    header {
+      padding: 1rem 1.25rem;
+      background: #111827;
+      border-bottom: 1px solid #334155;
+    }
+
+    h1 {
+      margin: 0 0 .5rem;
+      font-size: 1.35rem;
+    }
+
+    p {
+      margin: .25rem 0;
+      line-height: 1.5;
+    }
+
+    a {
+      color: #93c5fd;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem;
+      margin-top: .75rem;
+    }
+
+    .button {
+      display: inline-block;
+      padding: .55rem .8rem;
+      border-radius: .55rem;
+      background: #2563eb;
+      color: white;
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .hint {
+      color: #cbd5e1;
+      font-size: .95rem;
+    }
+
+    iframe {
+      display: block;
+      width: 100%;
+      height: calc(100vh - 178px);
+      min-height: 640px;
+      border: 0;
+      background: white;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Splendor 圖形化 AI 對戰</h1>
+    <p>下方嵌入的是 cestpasphoto 官方 browser GUI；選 <strong>You vs AI</strong> 可讓你先手，選 <strong>AI vs you</strong> 可讓 AI 先手。</p>
+    <p class="hint">如果瀏覽器擋住 iframe，請按「另開官方 GUI」。若要在瀏覽器中同時看建議走法，請使用 <code>python tools/splendor_hint_gui.py</code>；終端機版勝率提示與 undo 功能仍在 <code>tools/azg_human_hints.py</code>。</p>
+    <div class="actions">
+      <a class="button" href="https://cestpasphoto.github.io/splendor.html" target="_blank" rel="noopener noreferrer">另開官方 GUI</a>
+      <a class="button" href="../README.md" target="_blank">查看本專案使用說明</a>
+    </div>
+  </header>
+  <iframe
+    title="cestpasphoto Splendor AI GUI"
+    src="https://cestpasphoto.github.io/splendor.html"
+    referrerpolicy="no-referrer">
+  </iframe>
+</body>
+</html>

@@ -55,6 +55,30 @@ No ONNX function found for aten.adaptive_max_pool2d
 如果你有加 `--modern-onnx-export`，請先移除；只有在你明確想測試 PyTorch 新 exporter 時才需要它。
 
 
+
+## 完整資料層整合版（同步建議 + 下棋 + Undo）
+
+如果你要「不會不同步」的完整資料層整合，請使用本機整合版：
+
+```bash
+python tools/splendor_hint_gui.py \
+  --azg-path ../alpha-zero-general \
+  --checkpoint ../alpha-zero-general/splendor/pretrained_2players.pt \
+  --top 8 \
+  --numMCTSSims 200 \
+  --integrated-card-ui
+```
+
+這個模式不使用官方 hosted iframe；它用同一個 Python 後端狀態提供：
+
+- 盤面資料。
+- AlphaZero/MCTS 建議。
+- 合法動作按鈕。
+- AI 回合自動回應。
+- Undo。
+
+因此資料層是同步的。缺點是卡片視覺不是官方前端的完整複製，而是本專案的本機卡片化呈現。
+
 ## 官方卡片外觀 + 建議走法（伴隨模式）
 
 如果你想要官方 <https://cestpasphoto.github.io/splendor.html> 的卡片式外觀，同時在旁邊看到本工具的 AlphaZero 建議，可以啟動伴隨模式：
@@ -65,15 +89,17 @@ python tools/splendor_hint_gui.py \
   --checkpoint ../alpha-zero-general/splendor/pretrained_2players.pt \
   --top 8 \
   --numMCTSSims 200 \
-  --official-companion
+  --official-card-hints
 ```
 
-這會開啟一個左右分割頁面：
+這會開啟一個整合頁面：
 
-- 左邊：官方卡片式 Splendor GUI。
-- 右邊：本機 MCTS 建議面板。
+- 背景：官方卡片式 Splendor GUI。
+- 右側浮動面板：本機 MCTS 建議走法。
 
-> 重要限制：官方網頁和本機建議面板目前**不會自動同步局面**。請把右側建議當參考，在左側官方 GUI 手動下同一手；如果你也在右側按「下這手」，要確保兩邊都走相同局面。完整自動同步需要改寫或接入官方前端的遊戲狀態 API，目前官方 hosted page 沒有提供這個介面。
+如果你比較喜歡左右分割視窗，可以把 `--official-card-hints` 換成 `--official-companion`。
+
+> 重要限制：這是「視覺整合」，不是完整資料層整合。官方網頁和本機建議面板目前**不會自動同步局面**。若要同步資料層，請改用 `--integrated-card-ui`。
 
 ## 有建議走法的圖形介面（本機 GUI）
 

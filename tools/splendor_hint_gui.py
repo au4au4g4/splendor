@@ -13,6 +13,7 @@ import argparse
 import html
 import http.server
 import io
+import json
 import re
 import socketserver
 import traceback
@@ -102,6 +103,22 @@ def parse_args() -> argparse.Namespace:
         help="Temperature used for displayed visit distribution.",
     )
     parser.add_argument("--ai-first", action="store_true", help="Let the checkpoint AI move first.")
+    parser.add_argument(
+        "--integrated-card-ui",
+        action="store_true",
+        help=(
+            "Open the local data-integrated card UI. The board, hints, moves, AI, "
+            "and undo all use the same backend state."
+        ),
+    )
+    parser.add_argument(
+        "--official-card-hints",
+        action="store_true",
+        help=(
+            "Open an integrated page with the official card UI and a floating "
+            "local AlphaZero hint panel. The panes are not automatically synchronized."
+        ),
+    )
     parser.add_argument(
         "--official-companion",
         action="store_true",
@@ -197,11 +214,15 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
-def board_html(game, board) -> str:
+def board_text(game, board) -> str:
     stream = io.StringIO()
     with redirect_stdout(stream):
         game.printBoard(board)
-    return html.escape(strip_ansi(stream.getvalue()))
+    return stream.getvalue()
+
+
+def board_html(game, board) -> str:
+    return html.escape(strip_ansi(board_text(game, board)))
 
 
 def move_label(game, formatter, action: int, player: int) -> str:
@@ -224,6 +245,73 @@ def legal_move_buttons(ctx: AppContext, canonical_board) -> str:
         )
     return "\n".join(buttons)
 
+
+
+def hint_rows_for_api(ctx: AppContext):
+    if game_ended(ctx) or ctx.state.current_player != ctx.human_player:
+        return []
+    canonical_board = ctx.game.getCanonicalForm(ctx.state.board, ctx.state.current_player)
+    probabilities, _, _ = ctx.hint_advisor.getActionProb(
+        canonical_board,
+        temp=ctx.hint_temperature,
+        force_full_search=True,
+    )
+    rows = collect_hint_rows(ctx.game, ctx.hint_advisor, canonical_board, probabilities, ctx.formatter)
+    ranked = sorted(rows, key=lambda row: row_sort_key(ctx.sort_by, row), reverse=True)[: ctx.top]
+    return [
+        {
+            "rank": index,
+            "action": row.action,
+            "win_pct": None if row.estimated_win_rate is None else round(100.0 * row.estimated_win_rate, 1),
+            "visits": row.visits,
+            "prob_pct": round(100.0 * row.probability, 1),
+            "prior_pct": round(100.0 * row.prior, 1),
+            "label": row.label,
+        }
+        for index, row in enumerate(ranked, start=1)
+    ]
+
+
+def legal_moves_for_api(ctx: AppContext):
+    if game_ended(ctx) or ctx.state.current_player != ctx.human_player:
+        return []
+    canonical_board = ctx.game.getCanonicalForm(ctx.state.board, ctx.state.current_player)
+    valid_moves = ctx.game.getValidMoves(canonical_board, 0)
+    return [
+        {
+            "action": action,
+            "label": move_label(ctx.game, ctx.formatter, action, ctx.human_player),
+        }
+        for action, is_valid in enumerate(valid_moves)
+        if is_valid
+    ]
+
+
+def state_payload(ctx: AppContext) -> dict:
+    ended = game_ended(ctx)
+    board = ctx.state.board
+    status = [f"Turn {ctx.state.turn + 1}", f"目前玩家 P{ctx.state.current_player}"]
+    if ended:
+        status.append(f"Game over: {ctx.game.getGameEnded(board, ctx.state.current_player)}")
+    elif ctx.state.current_player == ctx.human_player:
+        status.append("輪到你")
+    else:
+        status.append("AI 思考中")
+    return {
+        "turn": ctx.state.turn,
+        "current_player": ctx.state.current_player,
+        "human_player": ctx.human_player,
+        "ended": ended,
+        "status": status,
+        "board_text": strip_ansi(board_text(ctx.game, board)),
+        "hints": hint_rows_for_api(ctx),
+        "legal_moves": legal_moves_for_api(ctx),
+        "log": list(reversed(ctx.state.log[-80:])),
+    }
+
+
+def json_response(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 def hints_table(ctx: AppContext, canonical_board) -> str:
     probabilities, _, _ = ctx.hint_advisor.getActionProb(
@@ -303,6 +391,51 @@ def advance_ai_until_human(ctx: AppContext) -> None:
         apply_action(ctx, action, "AI")
 
 
+
+def status_pills(ctx: AppContext, compact: bool = False) -> str:
+    board = ctx.state.board
+    status = [f"Turn {ctx.state.turn + 1}", f"目前玩家 P{ctx.state.current_player}"]
+    if game_ended(ctx):
+        status.append(f"Game over: {ctx.game.getGameEnded(board, ctx.state.current_player)}")
+    elif ctx.state.current_player == ctx.human_player:
+        status.append("輪到你")
+    else:
+        status.append("AI 思考中；請重新整理")
+    if compact:
+        status.append("請手動同步官方畫面")
+    return "".join(f'<span class="pill">{html.escape(item)}</span>' for item in status)
+
+
+def render_hints_panel(ctx: AppContext) -> bytes:
+    ended = game_ended(ctx)
+    body = (
+        "<header><h1>AlphaZero 建議</h1>"
+        f"<p>{status_pills(ctx, compact=True)}</p>"
+        "<form method='post' action='/undo' style='display:inline'><button class='danger'>Undo</button></form> "
+        "<a class='button' href='/hints-panel'>重新整理</a>"
+        "<p class='muted'>這個面板不會自動讀取左側官方網頁；請在官方 GUI 手動下同一手。</p>"
+        "</header>"
+    )
+    if ended:
+        body += "<main><section class='panel'><h2>遊戲結束</h2></section></main>"
+        return html_page("AlphaZero 建議", body)
+
+    if ctx.state.current_player == ctx.human_player:
+        canonical_board = ctx.game.getCanonicalForm(ctx.state.board, ctx.state.current_player)
+        body += (
+            "<main style='display:block'>"
+            "<section class='panel'><h2>建議走法</h2>"
+            f"{hints_table(ctx, canonical_board)}"
+            "<h2>所有合法動作</h2>"
+            f"<div class='moves'>{legal_move_buttons(ctx, canonical_board)}</div>"
+            "</section>"
+        )
+    else:
+        body += "<main style='display:block'><section class='panel'><h2>AI 回合</h2></section>"
+    log_items = "".join(f"<li>{html.escape(item)}</li>" for item in reversed(ctx.state.log))
+    body += f"<section class='panel'><h2>紀錄</h2><ol class='log'>{log_items}</ol></section></main>"
+    return html_page("AlphaZero 建議", body)
+
 def render(ctx: AppContext) -> bytes:
     ended = game_ended(ctx)
     board = ctx.state.board
@@ -352,6 +485,103 @@ def render(ctx: AppContext) -> bytes:
 
 
 
+
+
+def render_integrated_card_ui() -> bytes:
+    body = """
+<header>
+  <h1>Splendor AlphaZero 資料層整合版</h1>
+  <p class="muted">此頁不用官方 hosted iframe；盤面、建議、下棋、AI 回合與 Undo 全部共用同一個 Python 後端狀態，因此不會不同步。</p>
+  <button onclick="undoMove()" class="danger">Undo</button>
+  <button onclick="loadState()">重新整理</button>
+</header>
+<main style="grid-template-columns:minmax(520px,1.2fr) minmax(420px,.8fr);">
+  <section class="panel">
+    <h2>卡片式盤面區</h2>
+    <div id="status" class="moves"></div>
+    <div id="boardCards" style="display:grid;grid-template-columns:repeat(5,minmax(90px,1fr));gap:.75rem;margin-top:1rem;"></div>
+    <details style="margin-top:1rem"><summary>文字盤面 / debug</summary><pre id="boardText" class="board"></pre></details>
+  </section>
+  <section class="panel">
+    <h2>建議走法</h2>
+    <p class="muted">點「下這手」會直接送到同一個後端狀態，AI 也會自動回應；這裡是真正同步的資料層。</p>
+    <div id="hints"></div>
+    <h2>所有合法動作</h2>
+    <div id="legalMoves" class="moves"></div>
+    <h2>紀錄</h2>
+    <ol id="log" class="log"></ol>
+  </section>
+</main>
+<script>
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function cardColor(label) {
+  if (label.includes('blue') || label.includes('B')) return '#2563eb';
+  if (label.includes('green') || label.includes('G')) return '#16a34a';
+  if (label.includes('red') || label.includes('R')) return '#dc2626';
+  if (label.includes('white') || label.includes('W')) return '#e5e7eb';
+  if (label.includes('black') || label.includes('K')) return '#27272a';
+  return '#475569';
+}
+function renderPseudoCards(moves) {
+  const cards = moves.slice(0, 25).map(move => `
+    <button onclick="playMove(${move.action})" style="min-height:112px;text-align:left;border-radius:12px;background:${cardColor(move.label)};border:1px solid rgba(255,255,255,.35);box-shadow:0 8px 20px rgba(0,0,0,.22);">
+      <strong style="font-size:1.2rem">#${move.action}</strong><br>
+      <span style="font-size:.82rem">${escapeHtml(move.label)}</span>
+    </button>`).join('');
+  document.getElementById('boardCards').innerHTML = cards || '<p class="muted">目前沒有可顯示的合法動作卡片。</p>';
+}
+function renderHints(hints) {
+  if (!hints.length) {
+    document.getElementById('hints').innerHTML = '<p class="muted">目前沒有建議，可能是 AI 回合或遊戲結束。</p>';
+    return;
+  }
+  document.getElementById('hints').innerHTML = `<table><thead><tr><th>#</th><th>action</th><th>win%</th><th>visits</th><th>prob%</th><th>prior%</th><th>move</th><th></th></tr></thead><tbody>${hints.map(row => `
+    <tr><td>${row.rank}</td><td>${row.action}</td><td>${row.win_pct ?? 'n/a'}%</td><td>${row.visits}</td><td>${row.prob_pct}%</td><td>${row.prior_pct}%</td><td>${escapeHtml(row.label)}</td><td><button onclick="playMove(${row.action})">下這手</button></td></tr>`).join('')}</tbody></table>`;
+}
+function renderLegalMoves(moves) {
+  document.getElementById('legalMoves').innerHTML = moves.map(move => `<button title="${escapeHtml(move.label)}" onclick="playMove(${move.action})">${move.action}</button>`).join('');
+}
+async function loadState() {
+  const response = await fetch('/api/state');
+  const state = await response.json();
+  document.getElementById('status').innerHTML = state.status.map(item => `<span class="pill">${escapeHtml(item)}</span>`).join('');
+  document.getElementById('boardText').textContent = state.board_text;
+  renderPseudoCards(state.legal_moves);
+  renderHints(state.hints);
+  renderLegalMoves(state.legal_moves);
+  document.getElementById('log').innerHTML = state.log.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+}
+async function playMove(action) {
+  await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action})});
+  await loadState();
+}
+async function undoMove() {
+  await fetch('/api/undo', {method:'POST'});
+  await loadState();
+}
+loadState();
+</script>
+"""
+    return html_page("Splendor AlphaZero 資料層整合版", body)
+
+def render_official_card_hints() -> bytes:
+    body = f"""
+<div style="position:fixed; inset:0; background:white;">
+  <iframe title="Official Splendor card UI" src="{OFFICIAL_GUI_URL}" style="position:absolute; inset:0; width:100%; height:100%; border:0; background:white;"></iframe>
+</div>
+<aside style="position:fixed; right:16px; top:16px; bottom:16px; width:min(560px, 42vw); min-width:420px; z-index:10; box-shadow:0 18px 55px rgba(0,0,0,.45); border:1px solid #475569; border-radius:16px; overflow:hidden; background:#0f172a;">
+  <iframe title="AlphaZero hint panel" src="/hints-panel" style="width:100%; height:100%; border:0;"></iframe>
+</aside>
+<div style="position:fixed; left:16px; bottom:16px; z-index:11; max-width:720px; background:rgba(15,23,42,.92); color:#e2e8f0; padding:.75rem 1rem; border-radius:12px; border:1px solid #475569; font-family:system-ui,sans-serif;">
+  <strong>官方卡片外觀 + 建議走法</strong><br>
+  左側是官方卡片 GUI；右側是本機建議面板。兩者目前不能自動同步，請在官方 GUI 手動下右側推薦的同一手。
+  <a href="/official-companion" style="color:#93c5fd; margin-left:.5rem;">改用左右分割</a>
+</div>
+"""
+    return html_page("Splendor 官方卡片外觀 + 建議走法", body)
+
 def render_official_companion() -> bytes:
     body = f"""
 <header>
@@ -385,6 +615,14 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def send_json(self, payload: dict, status: int = 200) -> None:
+        content = json_response(payload)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def redirect_home(self) -> None:
         self.send_response(303)
         self.send_header("Location", "/")
@@ -392,10 +630,23 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
+            if self.path.startswith("/api/state"):
+                advance_ai_until_human(self.ctx)
+                self.send_json(state_payload(self.ctx))
+                return
+            if self.path.startswith("/integrated-card-ui"):
+                self.send_html(render_integrated_card_ui())
+                return
+            if self.path.startswith("/official-card-hints"):
+                self.send_html(render_official_card_hints())
+                return
             if self.path.startswith("/official-companion"):
                 self.send_html(render_official_companion())
                 return
             advance_ai_until_human(self.ctx)
+            if self.path.startswith("/hints-panel"):
+                self.send_html(render_hints_panel(self.ctx))
+                return
             self.send_html(render(self.ctx))
         except Exception as exc:  # Keep browser UI helpful instead of dropping the socket.
             self.send_html(render_runtime_error(exc), status=500)
@@ -403,13 +654,23 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            data = urllib.parse.parse_qs(self.rfile.read(length).decode())
-            if self.path == "/move":
-                action = int(data.get("action", ["-1"])[0])
+            raw_body = self.rfile.read(length).decode()
+            if self.headers.get("Content-Type", "").startswith("application/json"):
+                data = json.loads(raw_body or "{}")
+            else:
+                data = urllib.parse.parse_qs(raw_body)
+            if self.path in {"/move", "/api/move"}:
+                action_value = data.get("action", -1)
+                if isinstance(action_value, list):
+                    action_value = action_value[0]
+                action = int(action_value)
                 if not game_ended(self.ctx) and self.ctx.state.current_player == self.ctx.human_player:
                     apply_action(self.ctx, action, "Human")
                     advance_ai_until_human(self.ctx)
-            elif self.path == "/undo":
+                if self.path == "/api/move":
+                    self.send_json(state_payload(self.ctx))
+                    return
+            elif self.path in {"/undo", "/api/undo"}:
                 previous = rewind_history(
                     self.ctx.state.history,
                     UndoMode.SAME_PLAYER,
@@ -423,6 +684,9 @@ class HintGuiHandler(http.server.BaseHTTPRequestHandler):
                     self.ctx.state.turn = previous.turn
                     self.ctx.mcts_cls.reset_all_search_trees()
                     append_log(self.ctx, "Undo：回到你上一次決策前。")
+                if self.path == "/api/undo":
+                    self.send_json(state_payload(self.ctx))
+                    return
             self.redirect_home()
         except Exception as exc:  # Keep browser UI helpful instead of dropping the socket.
             self.send_html(render_runtime_error(exc), status=500)
@@ -459,7 +723,11 @@ def main() -> None:
     handler = type("ConfiguredHintGuiHandler", (HintGuiHandler,), {"ctx": ctx})
     with socketserver.TCPServer(("127.0.0.1", args.port), handler) as server:
         url = f"http://127.0.0.1:{args.port}/"
-        if args.official_companion:
+        if args.integrated_card_ui:
+            url = f"http://127.0.0.1:{args.port}/integrated-card-ui"
+        elif args.official_card_hints:
+            url = f"http://127.0.0.1:{args.port}/official-card-hints"
+        elif args.official_companion:
             url = f"http://127.0.0.1:{args.port}/official-companion"
         print(f"Splendor hint GUI: {url}")
         print("Press Ctrl+C to stop.")
